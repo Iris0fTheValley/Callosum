@@ -55,7 +55,33 @@ The original mouse, keyboard, clipboard, and screen-switching paths are preserve
 
 桌面切换检测增加了一个稳定性修复：跨机注入点击期间，如果 Windows 短暂无法查询输入桌面，不再误关闭 MWB socket。构建完整 PowerToys 源码前先运行 `scripts/Apply-MwbDesktopSwitchFix.ps1` 应用该补丁。
 
-For a controlled two-machine restart, run the management script from an elevated PowerShell on PC-A:
+### Zero-touch startup and recovery / 无感启动与自愈
+
+Run this once on **each machine**, from the signed-in Windows account that uses MWB:
+
+```powershell
+.\scripts\Install-MwbEnhanced.ps1 -Action install
+```
+
+The installer copies the guardian and tray scripts beside the enhanced binaries and creates one delayed, per-user logon task. The task runs in the interactive user session, starts MWB silently, publishes health to `%LOCALAPPDATA%\Callosum\health.json`, and keeps checking the local process, helper, listening ports, pairing settings, peer reachability, and the actual established MWB connection.
+
+每台机器只需在实际使用 MWB 的登录用户下运行一次上述命令。之后双方各自启动、各自检查，不依赖某一台机器通过 SSH 拉起另一台，也不依赖跨屏已经可用。守护器会区分“对端关机”和“对端在线但连接异常”：前者安静等待，后者持续 90 秒仍未恢复时才重启本机 MWB，并有冷却时间防止重启风暴。
+
+The guardian never creates or replaces a pairing key. If pairing is absent or invalid, it reports `InvalidSettings` and waits for the user to complete the normal one-time MWB pairing flow. Existing settings are left untouched.
+
+Common local controls are deliberately small:
+
+```powershell
+.\scripts\Install-MwbEnhanced.ps1 -Action status
+.\scripts\Install-MwbEnhanced.ps1 -Action restart
+.\scripts\Install-MwbEnhanced.ps1 -Action stop      # pause automatic recovery
+.\scripts\Install-MwbEnhanced.ps1 -Action start     # resume automatic recovery
+.\scripts\Install-MwbEnhanced.ps1 -Action uninstall # keep binaries and settings
+```
+
+The bilingual tray shows `Connected`, `WaitingForPeer`, `Connecting`, `Paused`, or a concrete configuration/error state. Pausing from the tray is persistent, so the guardian will not immediately undo an intentional stop. Logs are bounded and stored at `%LOCALAPPDATA%\Callosum\guardian.log`.
+
+For an optional controlled two-machine restart, run the management script on PC-A. This is an administrative convenience only; normal startup and recovery are local and independent on both machines:
 
 ```powershell
 .\scripts\Manage-MwbEnhanced.ps1 -Action status

@@ -8,6 +8,10 @@ param(
 
     [string]$SettingsPath = '',
 
+    [string]$GuardianPath = '',
+
+    [string]$StateDirectory = '',
+
     [int]$TcpPort = 15101
 )
 
@@ -22,6 +26,17 @@ $script:settingsPath = if ([string]::IsNullOrWhiteSpace($SettingsPath)) {
 } else {
     [IO.Path]::GetFullPath($SettingsPath)
 }
+$script:guardianPath = if ([string]::IsNullOrWhiteSpace($GuardianPath)) {
+    Join-Path $PSScriptRoot 'MwbGuardian.ps1'
+} else {
+    [IO.Path]::GetFullPath($GuardianPath)
+}
+$script:stateDirectory = if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
+    Join-Path $env:LOCALAPPDATA 'Callosum'
+} else {
+    [IO.Path]::GetFullPath($StateDirectory)
+}
+$script:healthPath = Join-Path $script:stateDirectory 'health.json'
 $script:busy = $false
 $script:currentState = ''
 $script:mutex = $null
@@ -41,10 +56,10 @@ try {
     $script:statusItem = New-Object Windows.Forms.ToolStripMenuItem
     $script:statusItem.Enabled = $false
 
-    $script:layoutItem = New-Object Windows.Forms.ToolStripMenuItem('Screen layout...')
-    $script:restartItem = New-Object Windows.Forms.ToolStripMenuItem('Restart MWB')
-    $script:stopItem = New-Object Windows.Forms.ToolStripMenuItem('Stop MWB')
-    $script:exitItem = New-Object Windows.Forms.ToolStripMenuItem('Exit tray')
+    $script:layoutItem = New-Object Windows.Forms.ToolStripMenuItem('屏幕布局 / Screen layout...')
+    $script:restartItem = New-Object Windows.Forms.ToolStripMenuItem('重新连接 / Restart')
+    $script:stopItem = New-Object Windows.Forms.ToolStripMenuItem('暂停自动恢复 / Pause')
+    $script:exitItem = New-Object Windows.Forms.ToolStripMenuItem('退出状态栏 / Exit tray')
 
     $menu = New-Object Windows.Forms.ContextMenuStrip
     [void]$menu.Items.Add($script:statusItem)
@@ -63,12 +78,32 @@ try {
     }
 
     function Get-MwbState {
+        if (Test-Path -LiteralPath $script:healthPath) {
+            try {
+                $health = Get-Content -LiteralPath $script:healthPath -Raw | ConvertFrom-Json
+                $age = ([DateTimeOffset]::Now - [DateTimeOffset]::Parse([string]$health.observedAt)).TotalSeconds
+                if ($age -le 45) {
+                    switch ([string]$health.state) {
+                        'Connected' { return '已连接 / Connected' }
+                        'WaitingForPeer' { return '等待对端 / Peer offline' }
+                        'Connecting' { return '正在连接 / Connecting' }
+                        'NotListening' { return '本机监听异常 / Listener down' }
+                        'Paused' { return '已暂停 / Paused' }
+                        'InvalidSettings' { return '配对配置无效 / Invalid settings' }
+                        'MissingBinary' { return '程序缺失 / Binary missing' }
+                        'Stopped' { return '正在恢复 / Recovering' }
+                        'Error' { return '守护异常 / Guardian error' }
+                    }
+                }
+            }
+            catch { }
+        }
         $processes = Get-MwbProcesses
         $main = $processes | Where-Object { [IO.Path]::GetFullPath($_.ExecutablePath) -eq $script:mainPath } | Select-Object -First 1
         $helper = $processes | Where-Object { [IO.Path]::GetFullPath($_.ExecutablePath) -eq $script:helperPath } | Select-Object -First 1
 
-        if (-not $main) { return 'Stopped' }
-        if (-not $helper) { return 'Running, helper missing' }
+        if (-not $main) { return '已停止 / Stopped' }
+        if (-not $helper) { return '运行中，助手缺失 / Helper missing' }
 
         $connected = $false
         try {
@@ -78,20 +113,20 @@ try {
             $connected = $false
         }
 
-        if ($connected) { return 'Connected' }
-        return "Running, disconnected (TCP $TcpPort/$($TcpPort + 1))"
+        if ($connected) { return '已连接 / Connected' }
+        return "运行中，未连接 / Disconnected ($TcpPort/$($TcpPort + 1))"
     }
 
     function Update-MwbState {
         $state = Get-MwbState
         if ($state -eq $script:currentState) { return }
         $script:currentState = $state
-        $script:statusItem.Text = "Status: $state"
+        $script:statusItem.Text = "状态 / Status: $state"
         $script:notifyIcon.Text = "MWB: $state"
         if ($state -like '*Connected*') {
             $script:notifyIcon.Icon = [Drawing.SystemIcons]::Information
         }
-        elseif ($state -like '*Stopped*') {
+        elseif ($state -like '*Stopped*' -or $state -like '*missing*' -or $state -like '*无效*' -or $state -like '*异常*') {
             $script:notifyIcon.Icon = [Drawing.SystemIcons]::Error
         }
         else {
@@ -228,6 +263,10 @@ try {
     }
 
     function Stop-Mwb {
+        if (Test-Path -LiteralPath $script:guardianPath) {
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script:guardianPath -Action pause -MainPath $script:mainPath -HelperPath $script:helperPath -TrayPath $script:trayPath -SettingsPath $script:settingsPath -StateDirectory $script:stateDirectory -TcpPort $TcpPort | Out-Null
+            return
+        }
         @(Get-MwbProcesses) | ForEach-Object {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
@@ -236,6 +275,11 @@ try {
     function Start-Mwb {
         if (-not (Test-Path -LiteralPath $script:mainPath)) {
             throw "MWB binary not found: $script:mainPath"
+        }
+
+        if (Test-Path -LiteralPath $script:guardianPath) {
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script:guardianPath -Action restart -MainPath $script:mainPath -HelperPath $script:helperPath -TrayPath $script:trayPath -SettingsPath $script:settingsPath -StateDirectory $script:stateDirectory -TcpPort $TcpPort | Out-Null
+            return
         }
 
         Stop-Mwb

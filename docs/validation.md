@@ -2,18 +2,26 @@
 
 ## Automated
 
-Previous run on PC-B (physical source/build machine):
+The deterministic suite can run on either Windows machine with the .NET 8 runtime/SDK. The real UNC test is dynamically skipped unless both smoke-test environment variables are present:
 
 ```text
 dotnet test EnhancedDragDrop.Tests\EnhancedDragDrop.Tests.csproj --no-restore
-Passed: 6, Failed: 0, Skipped: 0
+Passed: 6, Failed: 0, Skipped: 1
 ```
 
 Covered cases include single and many-item manifests, mixed files/folders, Unicode paths, length-prefixed frames, multi-chunk manifests, duplicate chunks, invalid shares, drop/cancel state transitions, recursive backend fixtures, and no-overwrite conflicts. / 覆盖单文件、多文件、文件与目录混合、Unicode 路径、分帧、多块、重复块、无效共享、放下/取消状态、递归后端 fixture 和不覆盖冲突。
 
-The seventh test ran the streaming backend against a real UNC source on PC-B (`\\192.168.1.7\ID-BLUEBERRY_C\AgentWork\mwb-smb-smoke-source\中文-テスト.txt`) and wrote the result to the PC-B local SSD.
+When configured, the seventh test runs the streaming backend against a real UNC source on PC-B (`\\192.168.1.7\ID-BLUEBERRY_C\AgentWork\mwb-smb-smoke-source\中文-テスト.txt`) and writes the result to the PC-B local SSD.
 
 Latest rerun: the six deterministic tests passed. A subsequent run configured `MWB_SMB_SMOKE_SOURCE` to the authorized PC-B UNC share and `MWB_SMB_SMOKE_TARGET` to a fresh local directory; the real UNC streaming test passed and produced the 9-byte Unicode fixture. An earlier shell without those variables did not execute the optional smoke test and is not counted as a pass.
+
+On 2026-09-23 the complete suite was run again from PC-A against that real PC-B UNC fixture: 7 passed, 0 failed, 0 skipped. The temporary local target and copied fixture were removed after verification.
+
+## Guardian validation
+
+`scripts/MwbGuardian.ps1` is a local-only, per-user supervisor. It validates the existing pairing structure without reading secrets into its status output, writes health atomically, rotates its log, prevents duplicate supervisors with a named mutex, and uses exact executable paths when starting or stopping processes. A missing/offline peer does not trigger restart churn; recovery begins only after the peer TCP endpoint is reachable while the MWB connection remains absent for the configured grace period.
+
+`scripts/Install-MwbEnhanced.ps1` installs one delayed logon task with `Interactive`/`Limited` rights, `IgnoreNew` duplicate handling, restart-on-failure, battery-safe settings, and no execution timeout. The supervisor rejects Session 0 by reconciling the MWB process into its own interactive session.
 
 ## SMB smoke
 
