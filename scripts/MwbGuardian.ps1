@@ -172,12 +172,15 @@ function Start-MwbProcesses {
         throw "MWB binary not found: $script:mainPath"
     }
     $main = Get-ExactProcess $script:mainPath | Select-Object -First 1
+    $startedMain = $false
     if ($null -eq $main) {
         $process = Start-Process -FilePath $script:mainPath -WorkingDirectory ([IO.Path]::GetDirectoryName($script:mainPath)) -PassThru
         Write-GuardianLog "MWB started. PID=$($process.Id)"
         Start-Sleep -Seconds 2
+        $startedMain = $true
     }
-    if ((Test-Path -LiteralPath $script:helperPath) -and -not (Get-ExactProcess $script:helperPath | Select-Object -First 1)) {
+    # MWB normally launches its helper itself; allow one check interval before intervening.
+    if (-not $startedMain -and (Test-Path -LiteralPath $script:helperPath) -and -not (Get-ExactProcess $script:helperPath | Select-Object -First 1)) {
         $helper = Start-Process -FilePath $script:helperPath -WorkingDirectory ([IO.Path]::GetDirectoryName($script:helperPath)) -PassThru
         Write-GuardianLog "MWB helper started. PID=$($helper.Id)"
     }

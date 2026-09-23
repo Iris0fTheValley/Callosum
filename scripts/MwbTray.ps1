@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [string]$MainPath,
@@ -58,7 +58,7 @@ try {
 
     $script:layoutItem = New-Object Windows.Forms.ToolStripMenuItem('屏幕布局 / Screen layout...')
     $script:restartItem = New-Object Windows.Forms.ToolStripMenuItem('重新连接 / Restart')
-    $script:stopItem = New-Object Windows.Forms.ToolStripMenuItem('暂停自动恢复 / Pause')
+    $script:stopItem = New-Object Windows.Forms.ToolStripMenuItem('暂停连接 / Pause')
     $script:exitItem = New-Object Windows.Forms.ToolStripMenuItem('退出状态栏 / Exit tray')
 
     $menu = New-Object Windows.Forms.ContextMenuStrip
@@ -123,7 +123,8 @@ try {
         $script:currentState = $state
         $script:statusItem.Text = "状态 / Status: $state"
         $script:notifyIcon.Text = "MWB: $state"
-        if ($state -like '*Connected*') {
+        $script:stopItem.Text = if ($state -eq '已暂停 / Paused') { '恢复连接 / Resume' } else { '暂停连接 / Pause' }
+        if ($state -eq '已连接 / Connected') {
             $script:notifyIcon.Icon = [Drawing.SystemIcons]::Information
         }
         elseif ($state -like '*Stopped*' -or $state -like '*missing*' -or $state -like '*无效*' -or $state -like '*异常*') {
@@ -324,7 +325,7 @@ try {
 
     $script:layoutItem.add_Click({ Invoke-MwbAction { Configure-MwbLayout } })
     $script:restartItem.add_Click({ Invoke-MwbAction { Start-Mwb } })
-    $script:stopItem.add_Click({ Invoke-MwbAction { Stop-Mwb } })
+    $script:stopItem.add_Click({ Invoke-MwbAction { if ($script:currentState -eq '已暂停 / Paused') { Start-Mwb } else { Stop-Mwb } } })
     $script:notifyIcon.add_DoubleClick({ Invoke-MwbAction { Start-Mwb } })
     $script:exitItem.add_Click({
         $script:notifyIcon.Visible = $false

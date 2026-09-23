@@ -34,17 +34,7 @@ if ([string]::IsNullOrWhiteSpace($RemoteUserProfile)) {
 $remoteSettings = Join-Path $RemoteUserProfile 'AppData\Local\Microsoft\PowerToys\MouseWithoutBorders\settings.json'
 $remoteStateDirectory = Join-Path $RemoteUserProfile 'AppData\Local\Callosum'
 
-function Test-HostResolvable([string]$Name) {
-    try { return [Net.Dns]::GetHostAddresses($Name).Count -gt 0 } catch { return $false }
-}
-
 $remoteEndpoint = $RemoteHost
-if (-not (Test-HostResolvable $remoteEndpoint)) {
-    $machineFromAccount = ($RemoteInteractiveUser -split '\\')[0]
-    if (-not [string]::IsNullOrWhiteSpace($machineFromAccount) -and (Test-HostResolvable $machineFromAccount)) {
-        $remoteEndpoint = $machineFromAccount
-    }
-}
 $sshOptions = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=accept-new')
 
 function Set-LocalDesiredState([ValidateSet('Running', 'Paused')] [string]$Desired) {
@@ -84,19 +74,12 @@ function Invoke-RemoteScript {
 function Write-RemoteFile {
     param(
         [Parameter(Mandatory)] [string]$Path,
-        [Parameter(Mandatory)] [byte[]]$Bytes
+        [Parameter(Mandatory)] [string]$SourcePath
     )
 
-    $payload = [Convert]::ToBase64String($Bytes)
-    $body = @(
-        '$ErrorActionPreference = ''Stop'''
-        '$ProgressPreference = ''SilentlyContinue'''
-        ('$TargetPath = ''' + ($Path -replace "'", "''") + '''')
-        '$raw = [Console]::In.ReadToEnd()'
-        '[IO.File]::WriteAllBytes($TargetPath, [Convert]::FromBase64String($raw))'
-    ) -join [Environment]::NewLine
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
-    $output = $payload | & ssh @sshOptions $remoteEndpoint "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded" 2>&1
+    if (-not (Test-Path -LiteralPath $SourcePath)) { throw "Local file not found: $SourcePath" }
+    $remotePath = $Path.Replace('\', '/')
+    $output = & scp @sshOptions -q $SourcePath "${remoteEndpoint}:$remotePath" 2>&1
     if ($LASTEXITCODE -ne 0) {
         $diagnostic = (@($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)
         throw "Remote file write failed on $remoteEndpoint (exit code $LASTEXITCODE): $diagnostic"
@@ -285,8 +268,13 @@ function Get-LocalProcessPaths {
 }
 
 function Stop-LocalTray {
+    $trayPaths = @($localTray, (Join-Path $LocalInstallDir $trayName)) | Select-Object -Unique
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -like "*$localTray*" } |
+        Where-Object {
+            $commandLine = $_.CommandLine
+            $_.Name -eq 'powershell.exe' -and $commandLine -and
+                @($trayPaths | Where-Object { $commandLine.Contains("-File `"$_`"") }).Count -gt 0
+        } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
@@ -314,9 +302,15 @@ function Stop-LocalMwb([switch]$PreserveDesiredState) {
 function Start-LocalTray {
     if (-not (Test-Path -LiteralPath $localTray)) { throw "Tray script not found: $localTray" }
     Stop-LocalTray
+    $trayToRun = $localTray
+    $installedTray = Join-Path $LocalInstallDir $trayName
+    if (Test-Path -LiteralPath $installedLocalGuardian) {
+        Copy-Item -LiteralPath $localTray -Destination $installedTray -Force
+        $trayToRun = $installedTray
+    }
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden',
-        '-File', "`"$localTray`"",
+        '-File', "`"$trayToRun`"",
         '-MainPath', "`"$localMain`"",
         '-HelperPath', "`"$localHelper`"",
         '-SettingsPath', (Get-LocalSettingsPath),
@@ -331,19 +325,26 @@ function Start-LocalMwb {
     if (-not (Test-Path -LiteralPath $localMain)) { throw "Local MWB binary not found: $localMain" }
     Stop-LocalMwb -PreserveDesiredState
     Set-LocalDesiredState 'Running'
-    $process = Start-Process -FilePath $localMain -WorkingDirectory $LocalInstallDir -PassThru
-    Start-Sleep -Seconds 3
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
+    $current = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq [IO.Path]::GetFullPath($localMain) } |
+        Select-Object -First 1
+    if (-not $current) {
+        $null = Start-Process -FilePath $localMain -WorkingDirectory $LocalInstallDir -PassThru
+        Start-Sleep -Seconds 3
+        $current = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq [IO.Path]::GetFullPath($localMain) } |
+            Select-Object -First 1
+    }
     if (-not $current -or $current.SessionId -eq 0) {
         Stop-LocalMwb
-        throw "Local MWB did not start in an interactive session. PID=$($process.Id)"
+        throw 'Local MWB did not start in an interactive session.'
     }
     $helper = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -eq [IO.Path]::GetFullPath($localHelper)) } | Select-Object -First 1
     if (-not $helper -and (Test-Path -LiteralPath $localHelper)) {
         Start-Process -FilePath $localHelper -WorkingDirectory $LocalInstallDir | Out-Null
     }
     Start-LocalTray
-    Write-Output ("LOCAL STARTED PID={0} SESSION={1}" -f $process.Id, $current.SessionId)
+    Write-Output ("LOCAL STARTED PID={0} SESSION={1}" -f $current.ProcessId, $current.SessionId)
 }
 
 function Wait-ForMwbConnection {
@@ -366,8 +367,8 @@ function Wait-ForMwbConnection {
 function Install-RemoteSupportScripts {
     if (-not (Test-Path -LiteralPath $localTray)) { throw "Tray script not found: $localTray" }
     if (-not (Test-Path -LiteralPath $localGuardianSource)) { throw "Guardian script not found: $localGuardianSource" }
-    Write-RemoteFile -Path $remoteTray -Bytes ([IO.File]::ReadAllBytes($localTray))
-    Write-RemoteFile -Path $remoteGuardian -Bytes ([IO.File]::ReadAllBytes($localGuardianSource))
+    Write-RemoteFile -Path $remoteTray -SourcePath $localTray
+    Write-RemoteFile -Path $remoteGuardian -SourcePath $localGuardianSource
 }
 
 function Invoke-RemoteStop {
@@ -379,7 +380,7 @@ $paths = @([IO.Path]::GetFullPath($RemoteMain), [IO.Path]::GetFullPath($RemoteHe
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
         ($_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -in $paths) -or
-        ($_.CommandLine -and $_.CommandLine -like "*$RemoteTray*") -or
+        ($_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.Contains("-File `"$RemoteTray`"")) -or
         $_.Name -in @('MouseWithoutBorders.exe', 'MouseWithoutBordersHelper.exe')
     } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -420,7 +421,7 @@ if (-not $loggedOnUser.Equals($InteractiveUser, [StringComparison]::OrdinalIgnor
 }
 $taskName = 'MwbEnhancedOneClick-' + [Guid]::NewGuid().ToString('N')
 $action = New-ScheduledTaskAction -Execute $RemoteMain -WorkingDirectory $RemoteDir
-$principal = New-ScheduledTaskPrincipal -UserId $InteractiveUser -LogonType Interactive -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId $InteractiveUser -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
 try {
     Start-ScheduledTask -TaskName $taskName
@@ -439,7 +440,8 @@ try {
     }
     if ($current.SessionId -eq 0) { throw "Remote MWB started in Session 0 (PID=$($current.ProcessId))." }
     $helper = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq [IO.Path]::GetFullPath($RemoteHelper) } | Select-Object -First 1
-    if (-not $helper -and (Test-Path -LiteralPath $RemoteHelper)) {
+    $guardianInstalled = $null -ne (Get-ScheduledTask -TaskName 'Callosum MWB Guardian' -ErrorAction SilentlyContinue)
+    if (-not $guardianInstalled -and -not $helper -and (Test-Path -LiteralPath $RemoteHelper)) {
         Start-Process -FilePath $RemoteHelper -WorkingDirectory $RemoteDir | Out-Null
     }
 
